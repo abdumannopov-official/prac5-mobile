@@ -1,0 +1,390 @@
+### Question 1
+
+- **Definition of Side-effect:** A side-effect is any change in the state of the application or interaction with the outside world (such as API calls, logging, database writes, or navigation) that happens outside the controlled scope/render cycle of a Composable function. 
+
+- **Why the composable body is dangerous:** A composable's body can be executed repeatedly, concurrently on different threads, and can be recomposed or discarded many times per second (e.g., during animations). Calling network requests or loggers directly in the body leads to duplicate calls and memory leaks. 
+
+- **Lecture's definition of "Effect":** An "Effect" is a Composable function that performs a side-effect under Compose's lifecycle control: synchronously with the composition lifecycle and safe from cancellation/re-execution issues. 
+
+- **Why data loading belongs in ViewModel:** Under Unidirectional Data Flow (UDF), a Composable should be a pure transformation of state into UI. A ViewModel survives configuration changes (like screen rotations) and insulates business logic/data fetching from continuous UI recompositions.
+
+  
+  
+
+
+| **I want to** | **API** |
+| - | - |
+| call a suspend function while the composable is in the Composition | `LaunchedEffect` |
+| launch a coroutine from a callback such as onClick | `rememberCoroutineScope` |
+| read the latest value inside an effect without restarting it | `rememberUpdatedState` |
+| register a listener and remove it afterwards | `DisposableEffect` |
+| publish Compose state to code Compose does not manage | `SideEffect` |
+| turn Flow, LiveData or RxJava into Compose State | `produceState` |
+| recompose less often than the input changes | `derivedStateOf` |
+| turn Compose State into a Flow | `snapshotFlow` |
+
+
+
+### Question 3
+
+1. **When does the effect start?** The effect starts when the composable enters the Composition for the first time (Initial Composition). 
+
+2. **What happens when `pulseRateMs` changes from 3000 to 1000?** Since `pulseRateMs` is passed as a key, the running coroutine of the effect is cancelled, and a new coroutine is launched with the new delay value (1000 ms). 
+
+3. **What happens to the while loop on Leave / `isActive`?** When the composable leaves the Composition, the effect's `CoroutineScope` is cancelled. `isActive` becomes `false`, delay/animation functions throw `CancellationException`, and the `while (isActive)` loop terminates cleanly. The `MiniComposition` model shows this explicitly via `effect.cancel()`
+
+
+### Question 4
+
+- **Why `LaunchedEffect(true)` is suspicious:** The key `true` (or `Unit`) guarantees the effect runs exactly once and never restarts. If it references variables that can change over time (like `userId`), the effect captures a stale value and fails to react to state updates. 
+
+- **When is a constant key appropriate?** When the task strictly needs to run once per screen lifetime (e.g., waiting on a splash screen delay before navigating away). 
+
+- **Fixing the code:**
+
+
+LaunchedEffect(userId) \{
+
+    api.sendHello(userId)
+
+\}
+
+
+### Question 5
+
+- **Why `LaunchedEffect` can't be called in callback?** `LaunchedEffect` is a `@Composable` function. The `onClick` callback is a standard non-composable lambda. In Compose, Composable functions cannot be invoked from non-composable contexts. 
+
+- **What `rememberCoroutineScope` returns & lifetime:** It returns a `CoroutineScope` tied to the point of composition. Its lifetime matches the composable's presence in the Composition; when the composable leaves, all coroutines launched in this scope are automatically cancelled. 
+
+- **Why `showSnackbar` is suspend:** Showing a snackbar involves delay and animation, as well as managing queuing/dismissal sequentially. 
+
+- **Correct version:**
+
+val scope = rememberCoroutineScope()
+
+Button(onClick = \{
+
+    scope.launch \{
+
+        snackbarHostState.showSnackbar("Hi")
+
+    \}
+
+\}) \{ Text("Show") \}
+
+
+- **Choice rule:** Use `LaunchedEffect` for work started because a composable appeared, and `rememberCoroutineScope` + `scope.launch` for work triggered by user interaction. 
+
+
+
+### Question 6
+
+- **Why effect calls stale lambda:** Since `LaunchedEffect(true)` never restarts, its coroutine retains a reference to the initial `onTimeout` lambda captured on first composition. 
+
+- **How `rememberUpdatedState` solves it:** It wraps the lambda inside a `State` object that gets updated on every recomposition without triggering an effect restart. Reading `.value` inside the effect always yields the latest reference. 
+
+- **Why wrong to make `onTimeout` the key:** Passing `onTimeout` as a key causes the effect to cancel and restart the 2-second timer every time a new lambda instance is passed. 
+
+- **What the model proves:** It proves that `rememberUpdatedState` ensures up-to-date execution of callbacks without resetting ongoing asynchronous operations. 
+
+
+
+### Question 7
+
+- **Why cleanup is needed / why missing cleanup causes leak:** `LifecycleEventObserver` is attached to an external `Lifecycle` object. Failing to remove it keeps references to UI components after the screen is destroyed, causing memory leaks and unwanted observer triggers. 
+
+- **OnDispose rule:** The `onDispose` block must be the last statement inside a `DisposableEffect` block. Without it, the code will not compile. 
+
+- **Empty `onDispose`:** It is a bad practice because `DisposableEffect` is specifically intended for resources requiring explicit cleanup. If no cleanup is needed, `LaunchedEffect` or `SideEffect` should be used instead. 
+
+- **Fixing the code:**
+
+
+
+DisposableEffect(lifecycleOwner) \{
+
+    val observer = LifecycleEventObserver \{ \_, event -\> /\* ... \*/ \}
+
+    lifecycleOwner.lifecycle.addObserver(observer)
+
+    onDispose \{
+
+        lifecycleOwner.lifecycle.removeObserver(observer)
+
+    \}
+
+\}
+
+
+### Question 8
+
+- **Console output (4 lines):**
+
+
+
+A.addObserver(observer)
+
+A.removeObserver(observer)
+
+B.addObserver(observer)
+
+B.removeObserver(observer)
+
+
+**Explanation:**
+
+1. The first `screen("A")` call runs the effect $\\rightarrow$ prints `A.addObserver(observer)`. 
+
+2. The second `screen("A")` call uses the same key $\\rightarrow$ no state change, effect does not restart (prints 0 lines). 
+
+3. The `screen("B")` call changes the key $\\rightarrow$ cleans up the old effect first (`A.removeObserver`), then adds the new one (`B.addObserver`). 
+
+4. `comp.leave()` disposes of the effect $\\rightarrow$ executes `onDispose` for B (`B.removeObserver`). 
+
+
+
+### Question 9
+
+- **When `SideEffect` runs:** It runs after **every successful** recomposition and tree commit. 
+
+- **Direct call vs Discarded composition:** Direct calls execute during uncommitted/discarded composition attempts. `SideEffect` guarantees execution only after a composition attempt successfully commits. 
+
+- **Lecture's attempt model:**
+
+  - Direct call, `commits=false`: executes (unsafe/duplicate execution). 
+
+  - `SideEffect`, `commits=false`: does **not** execute (safe). 
+
+  - `SideEffect`, `commits=true`: executes strictly once upon commit. 
+
+- **Does `SideEffect` take keys?** No, `SideEffect` does not take keys. 
+
+
+
+### Question 10
+
+- **What `produceState` does:** Converts non-Compose asynchronous data streams (coroutines, Flow, RxJava) into Compose `State`. The producer starts upon entering the Composition and cancels when leaving. 
+
+- **Why State conflates:** Assigning an identical value to a `State`'s `value` does not trigger UI recomposition (Compose conflates equal values). 
+
+- **Naming rule (lowercase):** Composables returning a value start with a lowercase letter (e.g., `produceState`), whereas Composables emitting UI elements returning `Unit` start with an uppercase letter.
+
+
+### Question 11
+
+- **Implementation:**
+
+
+
+@Composable
+
+fun \<T\> myProduceState(
+
+    initialValue: T,
+
+    key: Any?,
+
+    producer: suspend MutableState\<T\>.() -\> Unit
+
+): State\<T\> \{
+
+    val state = remember \{ mutableStateOf(initialValue) \}
+
+    LaunchedEffect(key) \{
+
+        state.producer()
+
+    \}
+
+    return state
+
+\}
+
+
+**Behavior:** It behaves like `LaunchedEffect`: whenever `key` changes, the ongoing producer coroutine is cancelled and a new one is launched.
+
+
+### Question 12
+
+- **Direct read vs `derivedStateOf`:** Direct state reads cause recomposition whenever the scroll offset/index changes (on almost every pixel). `derivedStateOf` only triggers recomposition when the resulting boolean condition (`index \> 0`) toggles between `true` and `false`. 
+
+- **Why wrapped in `remember`:** To preserve the same `derivedStateOf` instance across recompositions instead of recreating it every frame. 
+
+- **Model calculation (\[0, 0, 1, 2, 3, 4, 5, 3, 1, 0\]):**
+
+  - Direct read triggers on every index change: 0, 0, 1, 2, 3, 4, 5, 3, 1, 0 $\\rightarrow$ **9 recompositions**. 
+
+  - `derivedStateOf` checks `\> 0`: `\[false, false, true, true, true, true, true, true, true, false\]`. Changes occur only on initial state + 2 transitions (`false -\> true` at index 1 and `true -\> false` at index 0) $\\rightarrow$ **3 recompositions**. 
+
+
+### Question 13
+
+- **Why overhead:** `firstName` and `lastName` change infrequently (on user keypresses). A simple String calculation `val fullName = "$firstName $lastName"` is lighter and faster than setting up snapshot state tracking via `derivedStateOf`. 
+
+- **Correct version:**
+
+
+val fullName = "$firstName $lastName"
+
+
+- **Criterion:** Use `derivedStateOf` only when the inputs change **much more frequently** than the derived result changes. 
+
+- **Caution:** Avoid using `derivedStateOf` for basic string concatenations or simple math on low-frequency state. 
+
+
+### Question 14
+
+- **When to use `derivedStateOf`:** When a waveform display smoothly derives its layout state from a high-frequency changing playback position state. 
+
+- **3 cases NOT to use:**
+
+  1. *Amplitudes are precomputed:* No dynamic input state to observe. 
+
+  2. *Waveform is static:* State does not change over time. 
+
+  3. *Waveform updated manually with `LaunchedEffect` / `animate\*`:* Animations handle their own frame updates without needing derived state wrappers. 
+
+
+### Question 15
+
+- **What `snapshotFlow` does / Cold flow:** Converts Compose `State` objects into a Kotlin `Flow`. It is a cold flow because it only emits values when collected. 
+
+- **Operators:**
+
+  - `map`: Converts index to boolean (`index \> 0`). 
+
+  - `distinctUntilChanged`: Emits only when the boolean state flips. 
+
+  - `filter`: Passes values that are `true`. 
+
+- **Why `collect` inside `LaunchedEffect`:** Flow collection (`collect`) is a suspend operation requiring a coroutine context. 
+
+- **Model stream (0, 0, 1, 2, 5, 3, 0, 0, 1, 4):**
+
+  1. Raw Stream: `0, 0, 1, 2, 5, 3, 0, 0, 1, 4` 
+
+  2. Map (\> 0): `F, F, T, T, T, T, F, F, T, T` 
+
+  3. DistinctUntilChanged: `F, T, F, T` 
+
+  4. Filter (== true): `T, T` 
+
+  - **Result:** Exactly **2 events** are sent. 
+
+
+
+**Question 16**
+
+Context: The lecture's Effect model runs three variants while tick changes from 1 to 4 and owner changes only on tick 3, from "A" to "B".
+
+| Keys | Restarts (prediction) | Why |
+| - | - | - |
+| keys = \[\] | 0 restarts | Runs once upon initial composition. Retains a stale owner value when owner changes (Wrong/Stale). |
+| keys = \[owner\] | 1 restart (on tick 3) | Restarts strictly when the owner value changes from "A" to "B" (Right). |
+| keys = \[owner, tick\] | 3 restarts (on every tick) | Restarts on every step regardless of whether owner actually changed (Inefficient). |
+
+
+Task: Fill in the table. Which variant is wrong (it works with a stale value), which is right, and which is inefficient? Verify the result by running the lecture's model.
+
+
+
+### Question 17
+
+- **Keys classification:** `lifecycleOwner` **must** be a key. `currentOnStart` and `currentOnStop` **must not** be keys. 
+
+- **Why not keys:** They are wrapped using `rememberUpdatedState`, updating internal references without restarting the effect. 
+
+- **Problem if `lifecycleOwner` is not a key:** Changing the owner leaves the old listener attached and fails to attach to the new lifecycle owner. 
+
+- **Lecture's Key Point:** Any variable referenced inside `DisposableEffect` that is not wrapped in `rememberUpdatedState` MUST be passed as an effect key. 
+
+
+
+### Question 18
+
+- **Bugs in ChatScreen:**
+
+  1. `viewModel.markOpened(userId)` called directly in body (side-effect during composition). 
+
+  2. `LaunchedEffect(true)` captures stale `onClose` reference and uses constant key. 
+
+  3. `DisposableEffect(owner)` lacks `onDispose` block. 
+
+  4. `LaunchedEffect(Unit)` called inside `Button(onClick)` callback. 
+
+- **Corrected version:**
+
+@Composable
+
+fun ChatScreen(userId: String, onClose: () -\> Unit) \{
+
+    val scope = rememberCoroutineScope()
+
+    val owner = LocalLifecycleOwner.current
+
+    val currentOnClose by rememberUpdatedState(onClose)
+
+
+    // Fix 1 & Fix 2
+
+    LaunchedEffect(userId) \{
+
+        viewModel.markOpened(userId)
+
+        delay(5\_000)
+
+        currentOnClose()
+
+    \}
+
+
+    // Fix 3
+
+    DisposableEffect(owner) \{
+
+        val observer = LifecycleEventObserver \{ \_, \_ -\> \}
+
+        owner.lifecycle.addObserver(observer)
+
+        onDispose \{
+
+            owner.lifecycle.removeObserver(observer)
+
+        \}
+
+    \}
+
+
+    // Fix 4
+
+    Button(onClick = \{
+
+        scope.launch \{ send() \}
+
+    \}) \{ 
+
+        Text("Send") 
+
+    \}
+
+\}
+
+
+**Question 19**
+
+Context: The lecture's summary table organizes the eight APIs by three questions: when does it run, what is cleaned up, what restarts it.
+
+| API | Runs | Cleanup | Restarts on |
+| - | - | - | - |
+| LaunchedEffect | Upon entering Composition | On leaving or key change (cancels the coroutine) | Change in any of the keys |
+| rememberCoroutineScope | At the point of call inside Composition | On leaving Composition (cancels all launched coroutines) | Never (retains Scope) |
+| rememberUpdatedState | On every recomposition pass | None | Never |
+| DisposableEffect | Upon entering Composition | Executed inside the onDispose block | Change in any of the keys |
+| SideEffect | After every successful recomposition commit | None | Every successful recomposition |
+| produceState | Upon entering Composition | On leaving or key change (cancels the producer) | Change in any of the keys |
+| derivedStateOf | On demand when state is read | None | Changes in tracked input State |
+| snapshotFlow | When collect() is invoked | On collector coroutine cancellation | Changes in tracked State properties |
+
+
+Task: Fill in the table on your own. Then think of one real usage example from your own projects for each API.
+
